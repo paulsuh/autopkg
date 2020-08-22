@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/local/autopkg/python
 #
 # Copyright 2014 Timothy Sutton
 #
@@ -20,13 +20,15 @@
 create a new team specifically for the duplicate repo, and assign the source
 repo author to this team."""
 
+
 import json
 import optparse
 import os
 import subprocess
 import sys
-import urllib2
-
+import urllib.error
+import urllib.parse
+import urllib.request
 from pprint import pprint
 from tempfile import mkdtemp
 
@@ -34,21 +36,28 @@ BASE_URL = "https://api.github.com"
 TOKEN = None
 
 
-class RequestWithMethod(urllib2.Request):
+class RequestWithMethod(urllib.request.Request):
     """Custom Request class that can accept arbitrary methods besides
     GET/POST"""
+
     # http://benjamin.smedbergs.us/blog/2008-10-21/
     #        putting-and-deleteing-in-python-urllib2/
     def __init__(self, method, *args, **kwargs):
         self._method = method
-        urllib2.Request.__init__(self, *args, **kwargs)
+        urllib.request.Request.__init__(self, *args, **kwargs)
 
     def get_method(self):
         return self._method
 
 
-def call_api(endpoint, method="GET", query=None, data=None, headers=None,
-             accept="application/vnd.github.v3+json"):
+def call_api(
+    endpoint,
+    method="GET",
+    query=None,
+    data=None,
+    headers=None,
+    accept="application/vnd.github.v3+json",
+):
     """Return a tuple of a serialized JSON response and HTTP status code
     from a call to a GitHub API endpoint. Certain APIs return no JSON
     result and so the first item in the tuple (the response) will be None.
@@ -65,34 +74,33 @@ def call_api(endpoint, method="GET", query=None, data=None, headers=None,
     if query:
         url += "?" + query
     if data:
-        data = json.dumps(data)
+        data = json.dumps(data).encode()
 
     # Setup custom request and its headers
     req = RequestWithMethod(method, url)
     req.add_header("User-Agent", "AutoPkg")
     req.add_header("Accept", accept)
-    req.add_header("Authorization", "token %s" % TOKEN)
+    req.add_header("Authorization", f"token {TOKEN}")
     if headers:
-        for key, value in headers.items():
+        for key, value in list(headers.items()):
             req.add_header(key, value)
 
+    resp_data = None
     try:
-        urlfd = urllib2.urlopen(req, data=data)
+        urlfd = urllib.request.urlopen(req, data=data)
         status = urlfd.getcode()
         response = urlfd.read()
         if response:
             resp_data = json.loads(response)
-        else:
-            resp_data = None
-    except urllib2.HTTPError as err:
+    except urllib.error.HTTPError as err:
         status = err.code
-        print >> sys.stderr, "API error: %s" % err
+        print(f"API error: {err}", file=sys.stderr)
         try:
             error_json = json.loads(err.read())
-            print >> sys.stderr, "Server response:"
+            print("Server response:", file=sys.stderr)
             pprint(error_json, stream=sys.stderr)
         except BaseException:
-            print >> sys.stderr, err.read()
+            print(err.read(), file=sys.stderr)
     return (resp_data, status)
 
 
@@ -108,50 +116,80 @@ def clone_repo(url, bare=True):
 
 
 def main():
-    '''Our main routine'''
-    usage = ("Utility to duplicate an AutoPkg recipe repo on GitHub "
-             "to an organization and create a new team specifically "
-             "for the duplicate repo, and assign the source repo author "
-             "to this team."
-             "\n\n %prog [options] source-repo-user/recipe-repo-name")
+    """Our main routine"""
+    usage = (
+        "Utility to duplicate an AutoPkg recipe repo on GitHub "
+        "to an organization and create a new team specifically "
+        "for the duplicate repo, and assign the source repo author "
+        "to this team."
+        "\n\n %prog [options] source-repo-user/recipe-repo-name"
+    )
     default_org = "autopkg"
     permisison_levels = ["pull", "push", "admin"]
-    default_permission_level = "admin"
+    default_permission_level = "push"
     parser = optparse.OptionParser(usage=usage)
-    parser.add_option("-t", "--token",
-                      help="Auth token string to use. Required.")
-    parser.add_option("-o", "--destination-org", default=default_org,
-                      help=("GitHub org to fork the repo to. Defaults to '%s'."
-                            % default_org))
-    parser.add_option("-r", "--destination-repo-name",
-                      help=("Destination repo-name. Defaults to "
-                            "'username-recipes'"))
-    parser.add_option("-p", "--permission-level",
-                      default=default_permission_level,
-                      help=("Permission level to use for new team. Must be one "
-                            "of: %s. Defaults to %s."
-                            % (", ".join(permisison_levels),
-                               default_permission_level)))
+    parser.add_option("-t", "--token", help="Auth token string to use. Required.")
+    parser.add_option(
+        "-o",
+        "--destination-org",
+        default=default_org,
+        help=(f"GitHub org to fork the repo to. Defaults to '{default_org}'."),
+    )
+    parser.add_option(
+        "-r",
+        "--destination-repo-name",
+        help=(
+            "Destination repo-name. Defaults to "
+            "'username-recipes' (or 'orgname-recipes' if an "
+            "organization.)"
+        ),
+    )
+    parser.add_option(
+        "-p",
+        "--permission-level",
+        default=default_permission_level,
+        help=(
+            "Permission level to use for new team. Must be one "
+            f"of: {', '.join(permisison_levels)}. Defaults to "
+            f"{default_permission_level}."
+        ),
+    )
+    parser.add_option(
+        "-m",
+        "--org-team-member",
+        help=(
+            "If the source repo is an organization and not a "
+            "user, a valid GitHub user must be specified "
+            "with this option. This user will be added to "
+            "newly-created team."
+        ),
+    )
     opts, args = parser.parse_args()
-    if len(args) == 0:
-        sys.exit("You must provide a repo in the form of 'user/repo' as the "
-                 "only argument!")
-    if opts.permission_level not in permisison_levels:
-        sys.exit("Permission level option must be one of: %s."
-                 % ", ".join(permisison_levels))
-    if not opts.token:
-        sys.exit("You must provide a token with '-t', and it must have admin "
-                 "access for the org.")
 
-    repo_components = args[0].split("/")
+    if len(args) == 0:
+        sys.exit(
+            "You must provide a repo in the form of 'user/repo' as the "
+            "only argument!"
+        )
+    if opts.permission_level not in permisison_levels:
+        sys.exit(
+            f"Permission level option must be one of: {', '.join(permisison_levels)}."
+        )
+    if not opts.token:
+        sys.exit(
+            "You must provide a token with '-t', and it must have admin "
+            "access for the org."
+        )
+
+    repo_arg = args[0]
+    repo_arg = repo_arg.strip("/")
+    repo_components = repo_arg.split("/")
     source_repo_user = repo_components[-2]
     source_repo_name = repo_components[-1]
-    print ("Using source repo: user %s, repo %s"
-           % (source_repo_user, source_repo_name))
-    destination_repo_name = (opts.destination_repo_name
-                             or source_repo_user + "-recipes")
+    print(f"Using source repo: user {source_repo_user}, repo {source_repo_name}")
+    destination_repo_name = opts.destination_repo_name or source_repo_user + "-recipes"
     dest_org = opts.destination_org
-    print "Will clone to %s/%s.." % (dest_org, destination_repo_name)
+    print(f"Will clone to {dest_org}/{destination_repo_name}..")
     global TOKEN
     TOKEN = opts.token
 
@@ -161,78 +199,118 @@ def main():
 
     # Grab the source repo metadata for later use
     # (currently we're only using description)
-    src_repo, code = call_api(
-        "/repos/%s/%s" % (source_repo_user, source_repo_name))
+    src_repo, code = call_api(f"/repos/{source_repo_user}/{source_repo_name}")
+
+    # Pick who's going to be the new team member
+    new_team_member = source_repo_user
+    if src_repo["owner"]["type"] == "Organization":
+        print(f"The source repo '{source_repo_name}' is owned by an organization.")
+        if not opts.org_team_member:
+            sys.exit(
+                "You must also specify the '--org-team-member' option to "
+                "specify the user that will be added to the new team."
+            )
+        new_team_member = opts.org_team_member
+
+    _, code = call_api(f"/users/{new_team_member}")
+    if code != 200:
+        sys.exit(
+            f"New team member '{new_team_member}' doesn't seem to be a valid GitHub "
+            "user account."
+        )
 
     # Get the existing repos of the destination user or org
     dest_repos = []
-    print "Fetching %s's public repos.." % dest_org
-    dest_repos_result, code = call_api("/users/%s/repos" % dest_org)
+    print(f"Fetching {dest_org}'s public repos..")
+    dest_repos_result, code = call_api(f"/users/{dest_org}/repos")
     if dest_repos_result:
         dest_repos = [r["name"] for r in dest_repos_result]
         if destination_repo_name in dest_repos:
-            sys.exit("User %s already has a repo called '%s'!"
-                     % (dest_org, destination_repo_name))
+            sys.exit(
+                f"User {dest_org} already has a repo called '{destination_repo_name}'!"
+            )
 
     # Repo is going to get its own team with the same name
     new_team_name = destination_repo_name
-    teams, code = call_api("/orgs/%s/teams" % dest_org)
+    teams, code = call_api(f"/orgs/{dest_org}/teams")
     if new_team_name in [t["name"] for t in teams]:
-        sys.exit("Team %s already exists." % new_team_name)
+        sys.exit(f"Team {new_team_name} already exists.")
+
+    # Let the user confirm what's going to happen
+    prompt = f"""\n\nHere's what's going to happen: the repo at '{repo_arg}'
+will be be cloned and pushed to a new repo at '{dest_org}/{destination_repo_name}'.
+A new team, '{new_team_name}', will be created with access to this repo,
+and the GitHub user '{new_team_member}' will be added to it with
+'{opts.permission_level}' rights.
+
+Type 'yes' to proceed: """
+    response = input(prompt)
+    if response != "yes":
+        sys.exit("Aborted.")
 
     # Create the new bare repo
-    new_repo_data = {"name": destination_repo_name,
-                     "description": src_repo["description"],
-                     "auto_init": False}
-    _, code = call_api("/orgs/%s/repos" % dest_org,
-                       method="POST",
-                       data=new_repo_data)
+    new_repo_data = {
+        "name": destination_repo_name,
+        "description": src_repo["description"],
+        "auto_init": False,
+    }
+    _, code = call_api(f"/orgs/{dest_org}/repos", method="POST", data=new_repo_data)
 
     # Create new team in the org for use with this repo
-    print "Creating new team: %s.." % new_team_name
+    print(f"Creating new team: {new_team_name}..")
     new_team_data = {
         "name": new_team_name,
         "permission": opts.permission_level,
-        "repo_names": ["%s/%s" % (dest_org, destination_repo_name)]}
-    new_team, code = call_api("/orgs/%s/teams" % dest_org,
-                              method="POST",
-                              data=new_team_data)
+        "repo_names": [f"{dest_org}/{destination_repo_name}"],
+    }
+    new_team, code = call_api(
+        f"/orgs/{dest_org}/teams", method="POST", data=new_team_data
+    )
     if code != 201:
         sys.exit("Error creating team!")
 
     # For some reason, the authenticated user automatically gets added
     # to the new team, which is not what we want, so remove the user
-    remove_member_endpoint = ("/teams/%s/members/%s"
-                              % (new_team["id"], auth_user))
+    remove_member_endpoint = "/teams/{}/members/{}".format(new_team["id"], auth_user)
     _, code = call_api(remove_member_endpoint, method="DELETE")
     if code != 204:
-        print >> sys.stderr, ("Warning: Unexpected HTTP result on removing "
-                              "%s from new team." % auth_user)
+        print(
+            "Warning: Unexpected HTTP result on removing "
+            f"{auth_user} from new team.",
+            file=sys.stderr,
+        )
 
     # Add the user to the new team
     # https://developer.github.com/v3/orgs/teams/#add-team-membership
-    print "Adding %s to new team.." % source_repo_user
-    user_add_team_endpoint = ("/teams/%s/memberships/%s"
-                              % (new_team["id"], source_repo_user))
+    print(f"Adding {new_team_member} to new team..")
+    user_add_team_endpoint = "/teams/{}/memberships/{}".format(
+        new_team["id"], new_team_member
+    )
     # We need to explicitly set a Content-Length of 0, otherwise
     # the API server is expecting us to send data because of PUT
-    response, code = call_api(user_add_team_endpoint,
-                              headers={"Content-Length": 0},
-                              method="PUT")
+    response, code = call_api(
+        user_add_team_endpoint, headers={"Content-Length": 0}, method="PUT"
+    )
     if code == 200:
-        print "User membership of team is now %s" % response["state"]
+        print(f"User membership of team is now {response['state']}")
     else:
-        sys.exit("Error adding team member %s to new team, "
-                 "HTTP status code %s." % (source_repo_user, code))
+        sys.exit(
+            f"Error adding team member {new_team_member} to new team, "
+            f"HTTP status code {code}."
+        )
 
     # Duplicate the repo using Git
     # https://help.github.com/articles/duplicating-a-repository
-    repodir = clone_repo("https://github.com/%s/%s"
-                         % (source_repo_user, source_repo_name))
+    repodir = clone_repo(f"ssh://git@github.com/{source_repo_user}/{source_repo_name}")
     os.chdir(repodir)
-    subprocess.call(["git", "push", "--mirror",
-                     "https://github.com/%s/%s"
-                     % (dest_org, destination_repo_name)])
+    subprocess.call(
+        [
+            "git",
+            "push",
+            "--mirror",
+            f"ssh://git@github.com/{dest_org}/{destination_repo_name}",
+        ]
+    )
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
-#!/usr/bin/python
+#!/usr/local/autopkg/python
 #
+# Refactoring 2018 Michal Moravec
 # Copyright 2014 Timothy Sutton
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -17,92 +18,210 @@
 
 import json
 import os
-import sys
-import urllib2
+import re
+import tempfile
+from urllib.parse import quote
+from typing import List, Optional
 
-from base64 import b64encode
-from getpass import getpass
-from pprint import pprint
+from autopkglib import get_pref, log, log_err
+from autopkglib.URLGetter import URLGetter
 
 BASE_URL = "https://api.github.com"
 TOKEN_LOCATION = os.path.expanduser("~/.autopkg_gh_token")
+DEFAULT_SEARCH_USER = "autopkg"
 
 
-class RequestWithMethod(urllib2.Request):
-    """Custom Request class that can accept arbitrary methods besides
-    GET/POST"""
-    # http://benjamin.smedbergs.us/blog/2008-10-21/
-    #        putting-and-deleteing-in-python-urllib2/
-    def __init__(self, method, *args, **kwargs):
-        self._method = method
-        urllib2.Request.__init__(self, *args, **kwargs)
-
-    def get_method(self):
-        return self._method
-
-
-class GitHubSession(object):
+class GitHubSession(URLGetter):
     """Handles a session with the GitHub API"""
-    def __init__(self):
-        self.token = None
 
-    def setup_token(self):
-        """Return a GitHub OAuth token string. Will create one if necessary.
-        The string will be stored in TOKEN_LOCATION and used again
-        if it exists."""
+    def __init__(self, curl_path=None, curl_opts=None):
+        super(GitHubSession, self).__init__()
+        self.env = {}
+        self.env["url"] = None
+        if curl_path:
+            self.env["CURL_PATH"] = curl_path
+        if curl_opts:
+            self.env["curl_opts"] = curl_opts
+        self.http_result_code = None
+        self.token = self._get_token()
 
-        #TODO: - support defining alternate scopes
-        #      - deal with case of an existing token with the same note
-        if not os.path.exists(TOKEN_LOCATION):
-            print """You will now be asked to enter credentials to a GitHub
-account in order to create an API token. This token has only
-a 'public' scope, meaning it cannot be used to retrieve
-personal information from your account, or push to any repos
-you may have access to. You can verify this token within your
-profile page at https://github.com/settings/applications and
-revoke it at any time. This token will be stored in your user's
-home folder at %s.""" % TOKEN_LOCATION
-            username = raw_input("Username: ")
-            password = getpass("Password: ")
-            auth = b64encode(username + ":" + password)
-
-            # https://developer.github.com/v3/oauth/#scopes
-            req = urllib2.Request(BASE_URL + "/authorizations")
-            req.add_header("Authorization", "Basic %s" % auth)
-            json_resp = urllib2.urlopen(req)
-            data = json.load(json_resp)
-
-            req_post = {"note": "AutoPkg CLI"}
-            req_json = json.dumps(req_post)
-            create_resp = urllib2.urlopen(req, req_json)
-            data = json.load(create_resp)
-
-            token = data["token"]
-            try:
-                with open(TOKEN_LOCATION, "w") as tokenf:
-                    tokenf.write(token)
-                os.chmod(TOKEN_LOCATION, 0600)
-            except IOError as err:
-                print >> sys.stderr, (
-                    "Couldn't write token file at %s! Error: %s"
-                    % (TOKEN_LOCATION, err))
-        else:
+    def _get_token(self) -> Optional[str]:
+        """Reads token from perferences or TOKEN_LOCATION.
+            Otherwise returns None.
+        """
+        token = get_pref("GITHUB_TOKEN")
+        if not token and os.path.exists(TOKEN_LOCATION):
             try:
                 with open(TOKEN_LOCATION, "r") as tokenf:
                     token = tokenf.read()
-            except IOError as err:
-                print >> sys.stderr, (
-                    "Couldn't read token file at %s! Error: %s"
-                    % (TOKEN_LOCATION, err))
+            except OSError as err:
+                log_err(f"Couldn't read token file at {TOKEN_LOCATION}! Error: {err}")
+                token = None
+        # TODO: validate token given we found one but haven't checked its
+        # auth status
+        return token
 
-            # TODO: validate token given we found one but haven't checked its
-            # auth status
+    def get_or_setup_token(self):
+        """Setup a GitHub OAuth token string. Will help to create one if necessary.
+        The string will be stored in TOKEN_LOCATION and used again
+        if it exists."""
+
+        token = self._get_token()
+        if not token and not os.path.exists(TOKEN_LOCATION):
+            print(
+                """Create a new token in your GitHub settings page:
+
+    https://github.com/settings/tokens
+
+To save the token, paste it to the following prompt."""
+            )
+
+            token = input("Token: ")
+            if token:
+                log(f"Writing token file {TOKEN_LOCATION}.")
+                try:
+                    with open(TOKEN_LOCATION, "w") as tokenf:
+                        tokenf.write(token)
+                    os.chmod(TOKEN_LOCATION, 0o600)
+                except OSError as err:
+                    log_err(
+                        f"Couldn't write token file at {TOKEN_LOCATION}! Error: {err}"
+                    )
+            else:
+                log("Skipping token file creation.")
 
         self.token = token
+        return token
 
+    def prepare_curl_cmd(
+        self, method, accept, headers, data, temp_content
+    ) -> List[str]:
+        """Assemble curl command and return it."""
+        curl_cmd = [
+            self.curl_binary(),
+            "--location",
+            "--silent",
+            "--show-error",
+            "--fail",
+            "--dump-header",
+            "-",
+        ]
 
-    def call_api(self, endpoint, method="GET", query=None, data=None,
-                 headers=None, accept="application/vnd.github.v3+json"):
+        curl_cmd.extend(["-X", method])
+        curl_cmd.extend(["--header", "User-Agent: AutoPkg"])
+        curl_cmd.extend(["--header", f"Accept: {accept}"])
+
+        # Pass the GitHub token as a header
+        if self.token:
+            curl_cmd.extend(["--header", f"Authorization: token {self.token}"])
+
+        self.add_curl_common_opts(curl_cmd)
+
+        # Additional headers if defined
+        if headers:
+            for header, value in headers.items():
+                curl_cmd.extend(["--header", f"{header}: {value}"])
+
+        # Set the data header if defined
+        if data:
+            data = json.dumps(data)
+            curl_cmd.extend(["-d", data, "--header", "Content-Type: application/json"])
+
+        # Final argument to curl is the URL
+        curl_cmd.extend(["--url", self.env["url"]])
+        curl_cmd.extend(["--output", temp_content])
+
+        return curl_cmd
+
+    def download_with_curl(self, curl_cmd):
+        """Download file using curl and return raw headers."""
+
+        p_stdout, p_stderr, retcode = self.execute_curl(curl_cmd)
+
+        if retcode:  # Non-zero exit code from curl => problem with download
+            curl_err = self.parse_curl_error(p_stderr)
+            log_err(
+                f"Curl failure: Could not retrieve URL {self.env['url']}: {curl_err}"
+            )
+
+            if retcode == 22:
+                # 22 means any 400 series return code. Note: header seems not to
+                # be dumped to STDOUT for immediate failures. Hence
+                # http_result_code is likely blank/000. Read it from stderr.
+                if re.search(r"URL returned error: [0-9]+", p_stderr):
+                    m = re.match(r".* (?P<status_code>\d+) .*", p_stderr)
+                    if m.group("status_code"):
+                        self.http_result_code = m.group("status_code")
+
+        return p_stdout
+
+    def search_for_name(
+        self,
+        name: str,
+        path_only: bool = False,
+        user: str = DEFAULT_SEARCH_USER,
+        use_token: bool = False,
+        results_limit: int = 100,
+    ):
+        """Search GitHub for results for a given name."""
+
+        query = f"q={quote(name)}+extension:recipe+user:{user}"
+
+        if path_only:
+            query += "+in:path,filepath"
+        else:
+            query += "+in:path,file"
+        query += f"&per_page={results_limit}"
+
+        results = self.code_search(query, use_token=False)
+
+        if not results or not results.get("total_count"):
+            log("Nothing found.")
+            return []
+
+        results_items = results["items"]
+
+        if not results_items:
+            log("Nothing found.")
+            return []
+        return results_items
+
+    def code_search(self, query: str, use_token: bool = False):
+        """Search GitHub code repos"""
+        if use_token:
+            _ = self.get_or_setup_token()
+        # Do the search, including text match metadata
+        (results, code) = self.call_api(
+            "/search/code",
+            query=query,
+            accept="application/vnd.github.v3.text-match+json",
+        )
+
+        if code == 403:
+            log_err(
+                "You've probably hit the GitHub's search rate limit, officially 5 "
+                "requests per minute.\n"
+            )
+            if results:
+                log_err("Server response follows:\n")
+                log_err(results.get("message", None))
+                log_err(results.get("documentation_url", None))
+
+            return None
+        if results is None or code is None:
+            log_err("A GitHub API error occurred!")
+            return None
+        return results
+
+    def call_api(
+        self,
+        endpoint: str,
+        method: str = "GET",
+        query: str = None,
+        data=None,
+        headers=None,
+        accept="application/vnd.github.v3+json",
+    ):
         """Return a tuple of a serialized JSON response and HTTP status code
         from a call to a GitHub API endpoint. Certain APIs return no JSON
         result and so the first item in the tuple (the response) will be None.
@@ -115,42 +234,52 @@ home folder at %s.""" % TOKEN_LOCATION
         accept: optional Accept media type for exceptional APIs (like release
                 assets)."""
 
-        url = BASE_URL + endpoint
+        # Compose the URL
+        self.env["url"] = BASE_URL + endpoint
         if query:
-            url += "?" + query
-        if data:
-            data = json.dumps(data)
+            self.env["url"] += "?" + query
 
-        # Setup custom request and its headers
-        req = RequestWithMethod(method, url)
-        req.add_header("User-Agent", "AutoPkg")
-        req.add_header("Accept", accept)
-        if self.token:
-            req.add_header("Authorization", "token %s" % self.token)
-        if headers:
-            for key, value in headers.items():
-                req.add_header(key, value)
+        temp_content = tempfile.NamedTemporaryFile().name
+        # Prepare curl command
+        curl_cmd = self.prepare_curl_cmd(method, accept, headers, data, temp_content)
+
+        # Execute curl command and parse headers
+        raw_headers = self.download_with_curl(curl_cmd)
+        header = self.parse_headers(raw_headers)
+        if header["http_result_code"] != "000":
+            self.http_result_code = int(header["http_result_code"])
 
         try:
-            urlfd = urllib2.urlopen(req, data=data)
-            status = urlfd.getcode()
-            response = urlfd.read()
-            if response:
-                resp_data = json.loads(response)
-            else:
-                resp_data = None
-        except urllib2.HTTPError as err:
-            status = err.code
-            print >> sys.stderr, "API error: %s" % err
-            try:
-                error_json = json.loads(err.read())
-                resp_data = error_json
-            except BaseException:
-                print >> sys.stderr, err.read()
-                resp_data = None
-        except urllib2.URLError as err:
-            print >> sys.stderr, "Error opening URL: %s" % url
-            print >> sys.stderr, err.reason
-            (resp_data, status) = (None, None)
+            with open(temp_content) as f:
+                resp_data = json.load(f)
+        except json.JSONDecodeError:
+            resp_data = None
 
-        return (resp_data, status)
+        return (resp_data, self.http_result_code)
+
+
+def print_gh_search_results(results_items):
+    """Pretty print our GitHub search results"""
+    if not results_items:
+        return
+    column_spacer = 4
+    max_name_length = max([len(r["name"]) for r in results_items]) + column_spacer
+    max_repo_length = (
+        max([len(r["repository"]["name"]) for r in results_items]) + column_spacer
+    )
+    spacers = (max_name_length, max_repo_length)
+
+    print()
+    format_str = "%-{}s %-{}s %-40s".format(*spacers)
+    print(format_str % ("Name", "Repo", "Path"))
+    print(format_str % ("----", "----", "----"))
+    results_items.sort(key=lambda x: x["repository"]["name"])
+    for result in results_items:
+        repo = result["repository"]
+        name = result["name"]
+        path = result["path"]
+        if repo["full_name"].startswith("autopkg"):
+            repo_name = repo["name"]
+        else:
+            repo_name = repo["full_name"]
+        print(format_str % (name, repo_name, path))

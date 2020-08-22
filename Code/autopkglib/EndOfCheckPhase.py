@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/local/autopkg/python
 #
 # Copyright 2013 Greg Neagle
 #
@@ -14,27 +14,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Place-holder processor that autopkg uses to mark the end of the check
-phase"""
+phase."""
 
 from autopkglib import Processor
-
 
 __all__ = ["EndOfCheckPhase"]
 
 
 class EndOfCheckPhase(Processor):
-    """This processor does nothing at all."""
-    input_variables = {
-    }
-    output_variables = {
-    }
-    description = __doc__
+    """This processor performs no action, but serves as a marker to signal
+    where AutoPkg should stop when the -c/--check options are used."""
 
+    input_variables = {}
+    output_variables = {}
+    description = __doc__
 
     def main(self):
         return
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     PROCESSOR = EndOfCheckPhase()
     PROCESSOR.execute_shell()

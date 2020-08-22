@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/local/autopkg/python
 #
 # Copyright 2014 Greg Neagle
 #
@@ -13,18 +13,20 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-'''Runs installer to install a package. Can install a package located inside a
-disk image file.'''
+"""Runs installer to install a package. Can install a package located inside a
+disk image file."""
 
 import subprocess
 
+
 class InstallerError(Exception):
-    '''Base error for Installer errors'''
+    """Base error for Installer errors"""
+
     pass
 
 
-class Installer(object):
-    '''Runs /usr/sbin/installer to install a package'''
+class Installer:
+    """Runs /usr/sbin/installer to install a package"""
 
     def __init__(self, log, socket, request):
         """Arguments:
@@ -38,38 +40,41 @@ class Installer(object):
         self.socket = socket
         self.request = request
 
-
     def verify_request(self):
-        '''Make sure copy request has everything we need'''
+        """Make sure copy request has everything we need"""
         self.log.debug("Verifying install request")
         for key in ["package"]:
-            if not key in self.request:
-                raise InstallerError("ERROR:No %s in request" % key)
+            if key not in self.request:
+                raise InstallerError(f"ERROR:No {key} in request")
 
     def do_install(self):
-        '''Call /usr/sbin/installer'''
-        pkg_path = self.request['package']
+        """Call /usr/sbin/installer"""
+        pkg_path = self.request["package"]
         try:
-            cmd = ['/usr/sbin/installer', '-verboseR',
-                   '-pkg', pkg_path, '-target', '/']
-            proc = subprocess.Popen(cmd, shell=False, bufsize=-1,
-                                    stdin=subprocess.PIPE,
-                                    stdout=subprocess.PIPE,
-                                    stderr=subprocess.STDOUT)
+            cmd = ["/usr/sbin/installer", "-verboseR", "-pkg", pkg_path, "-target", "/"]
+            proc = subprocess.Popen(
+                cmd,
+                shell=False,
+                bufsize=-1,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
             while True:
-                output = proc.stdout.readline().decode('UTF-8')
-                if not output and (proc.poll() != None):
+                output = proc.stdout.readline()
+                if not output and (proc.poll() is not None):
                     break
-                self.socket.send("STATUS:%s" % output.encode('UTF-8'))
+                self.socket.send(f"STATUS:{output}".encode())
                 self.log.info(output.rstrip())
 
             if proc.returncode != 0:
-                raise InstallerError("ERROR:%s\n" % proc.returncode)
-            self.log.info('install request completed.')
+                raise InstallerError(f"ERROR:{proc.returncode}\n")
+            self.log.info("install request completed.")
             return True
         except BaseException as err:
-            self.log.error("Install failed: %s" % err)
-            raise InstallerError("ERROR:%s\n" % err)
+            self.log.error(f"Install failed: {err}")
+            raise InstallerError(f"ERROR:{err}\n")
 
     def install(self):
         """Main method."""

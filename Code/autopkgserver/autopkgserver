@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/Library/AutoPkg/Python3/Python.framework/Versions/Current/bin/python3
 #
 # Copyright 2010 Per Olofsson
 #
@@ -44,9 +44,9 @@ Request format:
     pkgdir          The directory where the pkg will be created, must be a
                     directory owned by the calling user.
 
-    pkgname         The file or bundle name of the pkg, without pkg extension.
+    pkgname         The file name of the pkg, without pkg extension.
 
-    pkgtype         The package type, "flat" or "bundle".
+    pkgtype         The package type. "flat" is the only valid value.
 
     id              The package ID.
 
@@ -72,20 +72,19 @@ Request format:
 
 """
 
+import logging
+import logging.handlers
 import os
-import sys
-import time
-import stat
-import logging, logging.handlers
-import SocketServer
-import socket
 import plistlib
 import re
+import socket
+import socketserver
+import stat
 import struct
+import sys
+import time
 
 from packager import Packager, PackagerError
-import launch
-
 
 ###############
 ## Constants ##
@@ -95,7 +94,7 @@ import launch
 APPNAME = "autopkgserver"
 VERSION = "0.2"
 
-SOCKET = "/var/run/%s" % APPNAME
+SOCKET = f"/var/run/{APPNAME}"
 
 request_structure = {
     "pkgroot": str,
@@ -107,14 +106,9 @@ request_structure = {
     "infofile": str,
     "resources": str,
     "chown": list,
-    "scripts": str
+    "scripts": str,
 }
-chown_structure = {
-    "path": str,
-    "user": (str, int),
-    "group": (str, int),
-    "mode": str
-}
+chown_structure = {"path": str, "user": (str, int), "group": (str, int), "mode": str}
 
 
 #################
@@ -122,67 +116,61 @@ chown_structure = {
 #################
 
 
-# Set up signal handlers.
-#def sig_handler(num, frame):
-#    log.error("%s aborted with signal %d" % (APPNAME, num))
-#
-#signal.signal(signal.SIGHUP, sig_handler)
-#signal.signal(signal.SIGINT, sig_handler)
-#signal.signal(signal.SIGTERM, sig_handler)
+class AutoPkgServerError(Exception):
+    """Exception class for AutoPkgServer errors"""
+
+    pass
 
 
-class PkgHandler(SocketServer.StreamRequestHandler):
+class PkgHandler(socketserver.StreamRequestHandler):
     """Handler for packaging requests."""
 
-    re_uid_gid = re.compile(r'^AUTH:AUTHENTICATE (?P<uid>\d{1,10}):(?P<gid>\d{1,10})$')
+    re_uid_gid = re.compile(r"^AUTH:AUTHENTICATE (?P<uid>\d{1,10}):(?P<gid>\d{1,10})$")
 
     def verify_request_syntax(self, plist):
         """Verify the basic syntax of request plist."""
 
         # Keep a list of error messages.
-        errors = list()
+        errors = []
 
         # Root should be a dictionary.
         if not isinstance(plist, dict):
             errors.append("Request root is not a dictionary")
             # Bail out early if it's not.
-            return False
+            return (False, errors)
 
         syntax_ok = True
 
         # Verify existance and type of keys in the root.
-        for key, keytype in request_structure.items():
-            if not key in plist:
-                errors.append("Request is missing key '%s'" % key)
+        for key, keytype in list(request_structure.items()):
+            if key not in plist:
+                errors.append(f"Request is missing key '{key}'")
                 syntax_ok = False
             else:
                 if not isinstance(plist[key], keytype):
-                    errors.append( \
-                        "Request key %s is not of type %s" % \
-                        (key, str(keytype)))
+                    errors.append(f"Request key {key} is not of type {str(keytype)}")
                     syntax_ok = False
 
         if syntax_ok:
-
             # Check package type.
-            if plist.pkgtype not in ("bundle", "flat"):
-                errors.append("pkgtype must be flat or bundle")
+            if plist["pkgtype"] not in "flat":
+                errors.append("pkgtype must be flat")
                 syntax_ok = False
 
             # Make sure all chown entries are dictionaries, and children are
             # the correct type.
-            for chown_entry in plist.chown:
+            for chown_entry in plist["chown"]:
                 if not isinstance(chown_entry, dict):
                     errors.append("chown entry isn't dictionary")
                     syntax_ok = False
-                for key, keytype in chown_structure.items():
+                for key, keytype in list(chown_structure.items()):
                     if key not in chown_entry:
-                        errors.append("chown entry is missing %s" % key)
+                        errors.append(f"chown entry is missing {key}")
                     else:
                         if not isinstance(chown_entry[key], keytype):
-                            errors.append( \
-                                "Request key chown.%s is not of type %s" % \
-                                (key, str(keytype)))
+                            errors.append(
+                                f"Request key chown.{key} is not of type {str(keytype)}"
+                            )
                             syntax_ok = False
 
         return (syntax_ok, errors)
@@ -196,10 +184,10 @@ class PkgHandler(SocketServer.StreamRequestHandler):
         # /usr/include/sys/ucred.h
         #
         # struct xucred {
-        #         u_int   cr_version;             /* structure layout version */
-        #         uid_t   cr_uid;                 /* effective user id */
-        #         short   cr_ngroups;             /* number of advisory groups */
-        #         gid_t   cr_groups[NGROUPS];     /* advisory group list */
+        #         u_int   cr_version;            /* structure layout version */
+        #         uid_t   cr_uid;                /* effective user id */
+        #         short   cr_ngroups;            /* number of advisory groups */
+        #         gid_t   cr_groups[NGROUPS];    /* advisory group list */
         # };
 
         LOCAL_PEERCRED = 0x001
@@ -211,12 +199,15 @@ class PkgHandler(SocketServer.StreamRequestHandler):
         cr_groups = 3
 
         xucred_fmt = "IIh%dI" % NGROUPS
-        res = struct.unpack(xucred_fmt, self.request.getsockopt(0, LOCAL_PEERCRED, struct.calcsize(xucred_fmt)))
+        res = struct.unpack(
+            xucred_fmt,
+            self.request.getsockopt(0, LOCAL_PEERCRED, struct.calcsize(xucred_fmt)),
+        )
 
         if res[cr_version] != XUCRED_VERSION:
             raise OSError("Incompatible struct xucred version")
 
-        return res[cr_uid], res[cr_groups:cr_groups + res[cr_ngroups]]
+        return res[cr_uid], res[cr_groups : cr_groups + res[cr_ngroups]]
 
     def handle(self):
         """Handle an incoming packaging request."""
@@ -236,10 +227,10 @@ class PkgHandler(SocketServer.StreamRequestHandler):
 
             # Try to parse it.
             try:
-                plist = plistlib.readPlistFromString(plist_string)
-            except BaseException as e:
+                plist = plistlib.loads(plist_string)
+            except BaseException:
                 self.log.error("Malformed request")
-                self.request.send("ERROR:Malformed request\n")
+                self.request.send("ERROR:Malformed request\n".encode())
                 return
             self.log.debug("Parsed request plist")
 
@@ -247,33 +238,35 @@ class PkgHandler(SocketServer.StreamRequestHandler):
             syntax_ok, errors = self.verify_request_syntax(plist)
             if not syntax_ok:
                 self.log.error("Plist syntax error")
-                self.request.send("".join(["ERROR:%s\n" % e for e in errors]))
+                self.request.send("".join([f"ERROR:{e}\n" for e in errors]).encode())
                 return
 
-            if os.path.exists(plist.pkgroot):
-                name = os.path.basename(plist.pkgroot)
+            if os.path.exists(plist["pkgroot"]):
+                name = os.path.basename(plist["pkgroot"])
             else:
-                self.request.send("ERROR:Can't find pkgroot")
+                self.request.send("ERROR:Can't find pkgroot".encode())
                 return
 
-            self.log.info("Dispatching worker to process request for user %d" % (uid))
+            self.log.info(f"Dispatching worker to process request for user {uid}")
             try:
-                p = Packager(self.log, plist, name, uid, gid)
-                pkgpath = p.package()
-                self.log.info("Package built at %s" % pkgpath)
-                self.request.send("OK:%s\n" % pkgpath)
-            except PackagerError as e:
-                self.log.error("Packaging failed: %s" % (e))
-                self.request.send(str(e) + "\n")
+                pkgr = Packager(self.log, plist, name, uid, gid)
+                pkgpath = pkgr.package()
+                self.log.info(f"Package built at {pkgpath}")
+                print("Sending request")
+                self.request.send(f"OK:{pkgpath}\n".encode())
+            except PackagerError as err:
+                self.log.error(f"Packaging failed: {err}")
+                self.request.send(f"{err}\n".encode())
 
-        except BaseException as e:
-            self.log.error("Caught exception: %s" % repr(e))
-            self.request.send("ERROR:Caught exception: %s" % repr(e))
+        except BaseException as err:
+            self.log.error(f"Caught exception: {err}")
+            self.request.send(f"ERROR:Caught exception: {err}".encode())
             return
 
 
-class AutoPkgServer(SocketServer.UnixStreamServer):
-    """Daemon that runs as root, receiving requests to create installer packages."""
+class AutoPkgServer(socketserver.UnixStreamServer):
+    """Daemon that runs as root, receiving requests to create installer
+    packages."""
 
     allow_reuse_address = True
     request_queue_size = 10
@@ -284,12 +277,12 @@ class AutoPkgServer(SocketServer.UnixStreamServer):
         # socket from a file descriptor instead of creating our own.
         self.socket = socket.fromfd(socket_fd, socket.AF_UNIX, socket.SOCK_STREAM)
         self.socket.listen(self.request_queue_size)
-        SocketServer.BaseServer.__init__(self,
-                                         self.socket.getsockname(),
-                                         RequestHandlerClass)
+        socketserver.BaseServer.__init__(
+            self, self.socket.getsockname(), RequestHandlerClass
+        )
         self.timed_out = False
 
-    #def server_bind(self):
+    # def server_bind(self):
     #    """Override binding to inherit socket from launchd."""
     #
 
@@ -301,25 +294,22 @@ class AutoPkgServer(SocketServer.UnixStreamServer):
             log_console = logging.StreamHandler()
             log_console.setLevel(logging.DEBUG)
             log_file = logging.handlers.RotatingFileHandler(
-                "/private/var/log/%s" % APPNAME,
-                "a",
-                100000,
-                9,
-                "utf-8")
+                f"/private/var/log/{APPNAME}", "a", 100000, 9, "utf-8"
+            )
             log_file.setLevel(logging.DEBUG)
 
             console_formatter = logging.Formatter("%(message)s")
-            file_formatter = \
-                logging.Formatter("%(asctime)s %(module)s[%(process)d]: " + \
-                                  "%(message)s   (%(funcName)s)")
+            file_formatter = logging.Formatter(
+                "%(asctime)s %(module)s[%(process)d]: " + "%(message)s   (%(funcName)s)"
+            )
 
             log_console.setFormatter(console_formatter)
             log_file.setFormatter(file_formatter)
 
             self.log.addHandler(log_console)
             self.log.addHandler(log_file)
-        except (OSError, IOError) as e:
-            raise AutoPkgServerError("Can't open log: %s" % (e.strerror))
+        except OSError as err:
+            raise AutoPkgServerError(f"Can't open log: {err.strerror}")
 
     def handle_timeout(self):
         self.timed_out = True
@@ -328,7 +318,7 @@ class AutoPkgServer(SocketServer.UnixStreamServer):
 def main(argv):
     # Make sure we're launched as root
     if os.geteuid() != 0:
-        print >>sys.stderr, "%s must be run as root." % APPNAME
+        print(f"{APPNAME} must be run as root.", file=sys.stderr)
         # Sleep to avoid respawn.
         time.sleep(10)
         return 1
@@ -344,13 +334,13 @@ def main(argv):
     while True:
         info = os.stat(exepath)
         if info.st_uid != root_uid:
-            print >>sys.stderr, "%s must be owned by root." % exepath
+            print(f"{exepath} must be owned by root.", file=sys.stderr)
             path_ok = False
         if info.st_gid not in (wheel_gid, admin_gid):
-            print >>sys.stderr, "%s must have group wheel or admin." % exepath
+            print(f"{exepath} must have group wheel or admin.", file=sys.stderr)
             path_ok = False
         if info.st_mode & stat.S_IWOTH:
-            print >>sys.stderr, "%s mustn't be world writeable." % exepath
+            print(f"{exepath} mustn't be world writeable.", file=sys.stderr)
             path_ok = False
         exepath = os.path.dirname(exepath)
         if exepath == "/":
@@ -360,35 +350,33 @@ def main(argv):
         # Sleep to avoid respawn.
         time.sleep(10)
         return 1
-
     # Keep track of time for launchd.
     start_time = time.time()
 
     # Get socket file descriptors from launchd.
+    import launch2
+
     try:
-        sockets = launch.get_launchd_socket_fds()
-    except launch.LaunchDCheckInError as e:
-        print >>sys.stderr, "launchd check-in failed: %s" % e
+        sockets = launch2.launch_activate_socket("AutoPkgServer")
+    except launch2.LaunchDError as err:
+        print(f"launchd check-in failed: {err}", file=sys.stderr)
         time.sleep(10)
         return 1
 
-    if not "AutoPkgServer" in sockets:
-        print >>sys.stderr, "No AutoPkgServer in launchd sockets"
-        time.sleep(10)
-        return 1
+    sock_fd = sockets[0]
 
     # Create the server object.
-    server = AutoPkgServer(sockets["AutoPkgServer"][0], PkgHandler)
+    server = AutoPkgServer(sock_fd, PkgHandler)
     server.setup_logging()
 
     # Wrap main loop in try/finally to unlink the socket when we exit.
     try:
-        server.log.info("%s v%s starting" % (APPNAME, VERSION))
+        server.log.info(f"{APPNAME} v{VERSION} starting")
 
         # Serve all pending requests until we time out.
         while True:
             server.handle_request()
-            if server.timed_out == False:
+            if not server.timed_out:
                 continue
 
             # Keep running for at least 10 seconds make launchd happy.
@@ -397,17 +385,19 @@ def main(argv):
             if run_time < 10.0:
                 # Only sleep for a short while in case new requests pop up.
                 sleep_time = min(1.0, 10.0 - run_time)
-                server.log.debug( \
-                    "sleeping for %f seconds to make launchd happy" % sleep_time)
+                server.log.debug(
+                    "sleeping for %f seconds to make launchd happy" % sleep_time
+                )
                 time.sleep(sleep_time)
             else:
                 break
     finally:
         # Make sure the socket is removed.
-        #os.unlink(SOCKET)
+        # os.unlink(SOCKET)
         pass
 
     return 0
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     sys.exit(main(sys.argv))

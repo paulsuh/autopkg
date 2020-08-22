@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/local/autopkg/python
 #
 # Copyright 2013 Greg Neagle
 #
@@ -15,28 +15,35 @@
 # limitations under the License.
 """See docstring for PathDeleter class"""
 
-from autopkglib import Processor, ProcessorError
-import shutil
 import os
+import shutil
 
+from autopkglib import Processor, ProcessorError
 
 __all__ = ["PathDeleter"]
 
 
 class PathDeleter(Processor):
     """Deletes file paths."""
+
     input_variables = {
         "path_list": {
             "required": True,
-            "description":
-                "List of pathnames to be deleted",
-        },
+            "description": (
+                "An array or list of pathnames to be deleted, "
+                "even if that list contains a single item."
+            ),
+        }
     }
-    output_variables = {
-    }
+    output_variables = {}
     description = __doc__
 
     def main(self):
+        # if recipe writer gave us a single string instead of a list of strings,
+        # convert it to a list of strings
+        if isinstance(self.env["path_list"], str):
+            self.env["path_list"] = [self.env["path_list"]]
+
         for path in self.env["path_list"]:
             try:
                 if os.path.isfile(path) or os.path.islink(path):
@@ -45,15 +52,16 @@ class PathDeleter(Processor):
                     shutil.rmtree(path)
                 elif not os.path.exists(path):
                     raise ProcessorError(
-                        "Could not remove %s - it does not exist!" % path)
+                        f"Could not remove {path} - it does not exist!"
+                    )
                 else:
                     raise ProcessorError(
-                        "Could not remove %s - it is not a file, link, "
-                        "or directory" % path)
-                self.output("Deleted %s" % path)
-            except OSError, err:
-                raise ProcessorError(
-                    "Could not remove %s: %s" % (path, err))
+                        f"Could not remove {path} - it is not a file, link, "
+                        "or directory"
+                    )
+                self.output(f"Deleted {path}")
+            except OSError as err:
+                raise ProcessorError(f"Could not remove {path}: {err}")
 
 
 if __name__ == "__main__":

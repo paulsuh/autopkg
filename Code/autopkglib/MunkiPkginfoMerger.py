@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/local/autopkg/python
 #
 # Copyright 2013 Greg Neagle
 #
@@ -22,33 +22,27 @@ __all__ = ["MunkiPkginfoMerger"]
 
 class MunkiPkginfoMerger(Processor):
     """Merges two pkginfo dictionaries."""
+
     input_variables = {
-        "pkginfo": {
-            "required": False,
-            "description": "Dictionary of Munki pkginfo.",
-        },
+        "pkginfo": {"required": False, "description": "Dictionary of Munki pkginfo."},
         "additional_pkginfo": {
             "required": True,
             "description": (
                 "Dictionary containing additional Munki pkginfo. "
-                "This will be added to or replace keys in the pkginfo."),
-        },
-
-    }
-    output_variables = {
-        "pkginfo": {
-            "description": "Merged pkginfo.",
+                "This will be added to or replace keys in the pkginfo."
+            ),
         },
     }
+    output_variables = {"pkginfo": {"description": "Merged pkginfo."}}
     description = __doc__
 
     def main(self):
         if "pkginfo" not in self.env:
             self.env["pkginfo"] = {}
 
-        for key in self.env["additional_pkginfo"].keys():
+        for key in list(self.env["additional_pkginfo"].keys()):
             self.env["pkginfo"][key] = self.env["additional_pkginfo"][key]
-        self.output("Merged %s into pkginfo" % self.env["additional_pkginfo"])
+        self.output(f"Merged {self.env['additional_pkginfo']} into pkginfo")
 
 
 if __name__ == "__main__":

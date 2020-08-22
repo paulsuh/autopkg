@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/local/autopkg/python
 #
 # Copyright 2014 Greg Neagle
 # Borrowing liberally from Munki's munkilib/installer.py et al
@@ -14,23 +14,25 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-'''Copies stuff from a diskimage to the current boot disk. Really useful for
+"""Copies stuff from a diskimage to the current boot disk. Really useful for
 drag-n-drop vendor disk images so we don't have to package it first to install
-it'''
+it"""
 
 import os
 import stat
 import subprocess
+
 import xattr
 
 
 class ItemCopierError(Exception):
-    '''Base error for ItemCopier errors'''
+    """Base error for ItemCopier errors"""
+
     pass
 
 
-class ItemCopier(object):
-    '''Copies items from a mount_point to the current root volume'''
+class ItemCopier:
+    """Copies items from a mount_point to the current root volume"""
 
     def __init__(self, log, socket, request):
         """Arguments:
@@ -45,21 +47,19 @@ class ItemCopier(object):
         self.request = request
 
     def verify_request(self):
-        '''Make sure copy request has everything we need'''
+        """Make sure copy request has everything we need"""
         self.log.debug("Verifying copy_from_dmg request")
         for key in ["mount_point", "items_to_copy"]:
-            if not key in self.request:
-                raise ItemCopierError("No %s in request" % key)
+            if key not in self.request:
+                raise ItemCopierError(f"No {key} in request")
         for item in self.request["items_to_copy"]:
-            if not "source_item" in item:
-                raise ItemCopierError(
-                    "Missing source_item in items_to_copy item")
-            if not "destination_path" in item:
-                raise ItemCopierError(
-                    "Missing destination_path in items_to_copy item")
+            if "source_item" not in item:
+                raise ItemCopierError("Missing source_item in items_to_copy item")
+            if "destination_path" not in item:
+                raise ItemCopierError("Missing destination_path in items_to_copy item")
 
     def copy_items(self):
-        '''copies items from the mountpoint to the startup disk
+        """copies items from the mountpoint to the startup disk
         Returns 0 if no issues; some error code otherwise.
 
         self.request['items_to_copy'] is a list of dictionaries;
@@ -67,9 +67,9 @@ class ItemCopier(object):
         may optionally include:
         destination_item to rename the item on copy
         user, group and mode to explictly set those items
-        '''
-        mountpoint = self.request['mount_point']
-        for item in self.request['items_to_copy']:
+        """
+        mountpoint = self.request["mount_point"]
+        for item in self.request["items_to_copy"]:
 
             # get itemname
             source_itemname = item.get("source_item")
@@ -80,15 +80,15 @@ class ItemCopier(object):
             # check source path
             source_itempath = os.path.join(mountpoint, source_itemname)
             if not os.path.exists(source_itempath):
-                raise ItemCopierError(
-                    "Source item %s does not exist!" % source_itemname)
+                raise ItemCopierError(f"Source item {source_itemname} does not exist!")
 
             # check destination path
             destpath = item.get("destination_path")
             if not os.path.exists(destpath):
                 self.log.info(
-                    "Destination path %s does not exist, will determine "
-                    "owner/permissions from parent" % destpath)
+                    f"Destination path {destpath} does not exist, will determine "
+                    "owner/permissions from parent"
+                )
                 parent_path = destpath
                 new_paths = []
 
@@ -105,14 +105,14 @@ class ItemCopier(object):
                 # make the new tree with the parent's mode
                 try:
                     os.makedirs(destpath, mode=parent_mode)
-                except IOError:
+                except OSError:
                     raise ItemCopierError(
-                        "There was an IO error in creating the path %s!"
-                        % destpath)
-                except:
+                        f"There was an IO error in creating the path {destpath}!"
+                    )
+                except Exception:
                     raise ItemCopierError(
-                        "There was an unknown error in creating the path %s!"
-                        % destpath)
+                        f"There was an unknown error in creating the path %{destpath}"
+                    )
 
                 # chown each new dir
                 for new_path in new_paths:
@@ -120,70 +120,61 @@ class ItemCopier(object):
 
             # setup full destination path using 'destination_item', if supplied
             if dest_itemname:
-                full_destpath = os.path.join(
-                    destpath, os.path.basename(dest_itemname))
+                full_destpath = os.path.join(destpath, os.path.basename(dest_itemname))
             else:
                 full_destpath = os.path.join(
-                    destpath, os.path.basename(source_itemname))
+                    destpath, os.path.basename(source_itemname)
+                )
 
             # remove item if it already exists
             if os.path.exists(full_destpath):
-                self.log.info("Removing existing %s" % full_destpath)
+                self.log.info(f"Removing existing {full_destpath}")
                 retcode = subprocess.call(["/bin/rm", "-rf", full_destpath])
                 if retcode:
                     raise ItemCopierError(
-                        "Error removing existing %s: %s"
-                        % (full_destpath, retcode))
+                        f"Error removing existing {full_destpath}: {retcode}"
+                    )
 
             # all tests passed, OK to copy
-            self.log.info(
-                "Copying %s to %s" % (source_itemname, full_destpath))
+            self.log.info(f"Copying {source_itemname} to {full_destpath}")
             self.socket.send(
-                "STATUS:Copying %s to %s\n"
-                % (source_itemname.encode('UTF-8'),
-                   full_destpath.encode('UTF-8')))
+                f"STATUS:Copying {source_itemname} to {full_destpath}\n".encode()
+            )
             retcode = subprocess.call(
-                ["/bin/cp", "-pR", source_itempath, full_destpath])
+                ["/bin/cp", "-pR", source_itempath, full_destpath]
+            )
             if retcode:
                 raise ItemCopierError(
-                    "Error copying %s to %s: %s"
-                    % (source_itempath, full_destpath, retcode))
+                    f"Error copying {source_itempath} to {full_destpath}: {retcode}"
+                )
 
             # set owner
-            user = item.get('user', 'root')
-            self.log.info(
-                "Setting owner for '%s' to '%s'" % (full_destpath, user))
-            retcode = subprocess.call(
-                ['/usr/sbin/chown', '-R', user, full_destpath])
+            user = item.get("user", "root")
+            self.log.info(f"Setting owner for '{full_destpath}' to '{user}'")
+            retcode = subprocess.call(["/usr/sbin/chown", "-R", user, full_destpath])
             if retcode:
-                raise ItemCopierError(
-                    "Error setting owner for %s" % full_destpath)
+                raise ItemCopierError(f"Error setting owner for {full_destpath}")
 
             # set group
-            group = item.get('group', 'admin')
-            self.log.info(
-                "Setting group for '%s' to '%s'" % (full_destpath, group))
-            retcode = subprocess.call(
-                ['/usr/bin/chgrp', '-R', group, full_destpath])
+            group = item.get("group", "admin")
+            self.log.info(f"Setting group for '{full_destpath}' to '{group}'")
+            retcode = subprocess.call(["/usr/bin/chgrp", "-R", group, full_destpath])
             if retcode:
-                raise ItemCopierError(
-                    "Error setting group for %s" % full_destpath)
+                raise ItemCopierError(f"Error setting group for {full_destpath}")
 
             # set mode
-            mode = item.get('mode', 'o-w')
-            self.log.info(
-                "Setting mode for '%s' to '%s'" % (full_destpath, mode))
-            retcode = subprocess.call(['/bin/chmod', '-R', mode, full_destpath])
+            mode = item.get("mode", "o-w")
+            self.log.info(f"Setting mode for '{full_destpath}' to '{mode}'")
+            retcode = subprocess.call(["/bin/chmod", "-R", mode, full_destpath])
             if retcode:
-                raise ItemCopierError(
-                    "Error setting mode for %s" % full_destpath)
+                raise ItemCopierError(f"Error setting mode for {full_destpath}")
 
             # remove com.apple.quarantine attribute from copied item
             try:
                 if "com.apple.quarantine" in xattr.xattr(full_destpath).list():
                     xattr.xattr(full_destpath).remove("com.apple.quarantine")
             except BaseException as err:
-                raise ItemCopierError("Error removing xattr: %s" % err)
+                raise ItemCopierError(f"Error removing xattr: {err}")
             return True
 
     def copy(self):
