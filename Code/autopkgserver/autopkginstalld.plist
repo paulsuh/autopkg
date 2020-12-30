@@ -17,7 +17,9 @@
 			<key>SockPathName</key>
 			<string>/var/run/autopkginstalld</string>
 			<key>SockPathMode</key>
-			<integer>438</integer>
+			<integer>432</integer>
+			<key>SockPathGroup</key>
+			<integer>80</integer>
 		</dict>
 	</dict>
 </dict>
