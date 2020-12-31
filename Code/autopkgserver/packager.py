@@ -313,6 +313,8 @@ class Packager:
                     raise PackagerError(f"chown path {relpath} does not exist")
                 if os.path.islink(checkpath):
                     raise PackagerError(f"chown path {relpath} is a soft link")
+                if os.stat(checkpath).st_links > 1:
+                    raise PackagerError(f"chown path {relpath} is a file with multiple hard links")
 
         for entry in self.request["chown"]:
             self.log.debug("Let's check the path!")
